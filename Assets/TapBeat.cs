@@ -1,5 +1,6 @@
 using UnityEngine;
 using UnityEngine.UI;
+using UnityEngine.EventSystems;
 using System.Collections.Generic;
 using System.IO;
 
@@ -87,6 +88,14 @@ public class TapBeat : MonoBehaviour
     // ======== UI ========
     void BuildUI()
     {
+        // EventSystem（按钮点击必需）
+        if (FindObjectOfType<EventSystem>() == null)
+        {
+            var eventSystemGo = new GameObject("EventSystem");
+            eventSystemGo.AddComponent<EventSystem>();
+            eventSystemGo.AddComponent<StandaloneInputModule>();
+        }
+
         var canvasGo = new GameObject("Canvas");
         canvas = canvasGo.AddComponent<Canvas>();
         canvas.renderMode = RenderMode.ScreenSpaceOverlay;
@@ -374,6 +383,7 @@ public class TapBeat : MonoBehaviour
     {
         bool tapped = false;
         Vector2 tapPos = Vector2.zero;
+        int touchId = -1;
 
         if (Input.touchCount > 0)
         {
@@ -382,27 +392,28 @@ public class TapBeat : MonoBehaviour
             {
                 tapped = true;
                 tapPos = touch.position;
+                touchId = touch.fingerId;
             }
         }
         else if (Input.GetMouseButtonDown(0))
         {
             tapped = true;
             tapPos = Input.mousePosition;
-
-            // 检查是否点击了按钮区域（简单检测）
-            if (mode == GameMode.Menu)
-            {
-                // 让按钮处理点击
-                return;
-            }
         }
 
         if (!tapped) return;
 
+        // 检查是否点击了 UI 元素（按钮等）
+        bool overUI = touchId >= 0
+            ? EventSystem.current != null && EventSystem.current.IsPointerOverGameObject(touchId)
+            : EventSystem.current != null && EventSystem.current.IsPointerOverGameObject();
+
+        if (overUI) return; // 让 UI 按钮处理
+
         switch (mode)
         {
             case GameMode.Menu:
-                // 菜单点击由按钮处理
+                // 菜单区域的非按钮点击，忽略
                 break;
 
             case GameMode.Playing:
