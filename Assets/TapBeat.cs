@@ -5,9 +5,9 @@ using System.Collections.Generic;
 
 /// <summary>
 /// 纯黑屏节拍器
-/// - 音效长度跟按住时长有关
+/// - 点击时立即播放可延长音效，松手时停止
 /// - 涟漪为由内而外扩散的圆环
-/// - 设置界面：偏移量、音量、涟漪亮度
+/// - 设置界面：偏移量、音量、涟漪亮度（居中显示）
 /// </summary>
 public class TapBeat : MonoBehaviour
 {
@@ -31,6 +31,8 @@ public class TapBeat : MonoBehaviour
 
     // 音频
     AudioSource audioSource;
+    AudioClip loopClip;
+    int activeInputCount = 0; // 追踪当前活跃的触摸/按键数量
 
     // UI
     Canvas canvas;
@@ -56,10 +58,36 @@ public class TapBeat : MonoBehaviour
 
         audioSource = gameObject.AddComponent<AudioSource>();
         audioSource.playOnAwake = false;
+        audioSource.loop = true;
+        CreateLoopClip();
 
         LoadSettings();
         CreateRingSprite();
         BuildUI();
+    }
+
+    void CreateLoopClip()
+    {
+        // 创建一个短的可循环音效片段
+        int sr = AudioSettings.outputSampleRate;
+        float loopDuration = 0.1f; // 100ms 循环
+        int n = Mathf.CeilToInt(loopDuration * sr);
+        loopClip = AudioClip.Create("tapLoop", n, 1, sr, false);
+        float[] data = new float[n];
+
+        float baseFreq = 1200f;
+        float harmFreq = 1800f;
+
+        for (int i = 0; i < n; i++)
+        {
+            float t = (float)i / sr;
+            // 平滑的持续音效，带有轻微的振幅调制
+            float env = 0.8f + 0.2f * Mathf.Sin(2f * Mathf.PI * 10f * t);
+            data[i] = (Mathf.Sin(2f * Mathf.PI * baseFreq * t) * 0.3f +
+                       Mathf.Sin(2f * Mathf.PI * harmFreq * t) * 0.15f) * env;
+        }
+        loopClip.SetData(data, 0);
+        audioSource.clip = loopClip;
     }
 
     void LoadSettings()
@@ -128,12 +156,12 @@ public class TapBeat : MonoBehaviour
         scaler.referenceResolution = new Vector2(1080, 1920);
         canvasGo.AddComponent<GraphicRaycaster>();
 
-        // 设置面板
+        // 设置面板（居中显示）
         settingsPanel = new GameObject("Settings");
         settingsPanel.transform.SetParent(canvas.transform, false);
         var panelRt = settingsPanel.AddComponent<RectTransform>();
-        panelRt.anchorMin = new Vector2(0.1f, 0.7f);
-        panelRt.anchorMax = new Vector2(0.9f, 0.95f);
+        panelRt.anchorMin = new Vector2(0.1f, 0.375f);
+        panelRt.anchorMax = new Vector2(0.9f, 0.625f);
         panelRt.offsetMin = panelRt.offsetMax = Vector2.zero;
 
         var panelImg = settingsPanel.AddComponent<Image>();
@@ -144,14 +172,14 @@ public class TapBeat : MonoBehaviour
         {
             delayMs = v;
             SaveSettings();
-            PlayTapSound(0.15f);
+            PlayTapSoundOnce();
         });
 
         volumeSlider = CreateSlider(settingsPanel, "音量", 0.45f, 0f, 1f, volume, v =>
         {
             volume = v;
             SaveSettings();
-            PlayTapSound(0.15f);
+            PlayTapSoundOnce();
         });
 
         brightnessSlider = CreateSlider(settingsPanel, "涟漪", 0.15f, 0f, 1f, rippleBrightness, v =>
@@ -172,8 +200,8 @@ public class TapBeat : MonoBehaviour
         hintText.color = new Color(1, 1, 1, 0.3f);
         hintText.text = "双击下方空白区域开始";
         var hintRt = hintText.rectTransform;
-        hintRt.anchorMin = new Vector2(0, 0.55f);
-        hintRt.anchorMax = new Vector2(1, 0.65f);
+        hintRt.anchorMin = new Vector2(0, 0.28f);
+        hintRt.anchorMax = new Vector2(1, 0.35f);
         hintRt.offsetMin = hintRt.offsetMax = Vector2.zero;
     }
 
@@ -289,6 +317,9 @@ public class TapBeat : MonoBehaviour
                         return;
                     }
                     lastTapTime = Time.time;
+
+                    // 点击时立即播放音效和涟漪
+                    OnTapPress(touch.position);
                 }
             }
             else if (touch.phase == TouchPhase.Ended || touch.phase == TouchPhase.Canceled)
@@ -316,6 +347,9 @@ public class TapBeat : MonoBehaviour
                     return;
                 }
                 lastTapTime = Time.time;
+
+                // 点击时立即播放音效和涟漪
+                OnTapPress(Input.mousePosition);
             }
         }
         if (Input.GetMouseButtonUp(0) && mouseDown)
@@ -336,6 +370,8 @@ public class TapBeat : MonoBehaviour
             if (touch.phase == TouchPhase.Began)
             {
                 touchStartTimes[touch.fingerId] = Time.time;
+                // 点击时立即播放音效和涟漪
+                OnTapPress(touch.position);
             }
             else if (touch.phase == TouchPhase.Ended || touch.phase == TouchPhase.Canceled)
             {
@@ -353,6 +389,8 @@ public class TapBeat : MonoBehaviour
         {
             mouseDown = true;
             mouseDownTime = Time.time;
+            // 点击时立即播放音效和涟漪
+            OnTapPress(Input.mousePosition);
         }
         if (Input.GetMouseButtonUp(0) && mouseDown)
         {
@@ -389,36 +427,66 @@ public class TapBeat : MonoBehaviour
         hintText.gameObject.SetActive(false);
         touchStartTimes.Clear();
         mouseDown = false;
+        activeInputCount = 0;
+        StopTapSound();
+    }
+
+    void OnTapPress(Vector2 pos)
+    {
+        // 涟漪立即显示
+        SpawnRipple(pos, 0.15f);
+
+        // 开始播放音效
+        activeInputCount++;
+        if (activeInputCount == 1)
+        {
+            // 音效延迟播放
+            if (delayMs <= 0)
+            {
+                StartTapSound();
+            }
+            else
+            {
+                StartCoroutine(DelayedStartSound(delayMs / 1000f));
+            }
+        }
     }
 
     void OnTapRelease(Vector2 pos, float holdTime)
     {
-        // 涟漪立即显示
-        SpawnRipple(pos, holdTime);
-
-        // 音效延迟播放
-        if (delayMs <= 0)
+        // 松手时停止音效
+        activeInputCount = Mathf.Max(0, activeInputCount - 1);
+        if (activeInputCount == 0)
         {
-            PlayTapSound(holdTime);
-        }
-        else
-        {
-            StartCoroutine(DelayedSound(holdTime, delayMs / 1000f));
+            StopTapSound();
         }
     }
 
-    System.Collections.IEnumerator DelayedSound(float holdTime, float delaySec)
+    System.Collections.IEnumerator DelayedStartSound(float delaySec)
     {
         yield return new WaitForSeconds(delaySec);
-        PlayTapSound(holdTime);
+        if (activeInputCount > 0) // 确保还在按着
+        {
+            StartTapSound();
+        }
     }
 
-    void PlayTapSound(float holdTime)
+    void StartTapSound()
     {
-        // 音效时长：0.05s ~ 0.3s，由按住时长决定
-        float duration = Mathf.Clamp(0.05f + holdTime * 0.5f, 0.05f, 0.3f);
+        audioSource.volume = volume;
+        audioSource.Play();
+    }
 
+    void StopTapSound()
+    {
+        audioSource.Stop();
+    }
+
+    void PlayTapSoundOnce()
+    {
+        // 用于设置界面的预览音效
         int sr = AudioSettings.outputSampleRate;
+        float duration = 0.15f;
         int n = Mathf.CeilToInt(duration * sr);
         var clip = AudioClip.Create("tap", n, 1, sr, false);
         float[] data = new float[n];
@@ -434,7 +502,6 @@ public class TapBeat : MonoBehaviour
                        Mathf.Sin(2f * Mathf.PI * harmFreq * t) * 0.15f) * env;
         }
         clip.SetData(data, 0);
-
         audioSource.PlayOneShot(clip, volume);
     }
 
