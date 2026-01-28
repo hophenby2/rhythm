@@ -3,6 +3,12 @@
     package="com.unity3d.player"
     android:installLocation="preferExternal">
 
+    <!-- 麦克风权限（第二层 onset 检测需要） -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+
+    <!-- 前台服务权限（Android 10+ 系统音频捕获需要） -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+
     <application
         android:theme="@style/UnityThemeSelector"
         android:icon="@mipmap/app_icon"
@@ -24,7 +30,7 @@
             <meta-data android:name="unityplayer.SkipPermissionsDialog" android:value="true" />
         </activity>
 
-        <!-- 告诉 Unity 使用 Ambient 音频模式 -->
+        <!-- 告诉 Unity 使用 Ambient 音频模式，不打断其他 App 音乐 -->
         <meta-data android:name="unity.audio-focus" android:value="false" />
     </application>
 </manifest>
