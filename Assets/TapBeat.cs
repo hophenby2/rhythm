@@ -27,7 +27,7 @@ public class TapBeat : MonoBehaviour
     const float DoubleTapThreshold = 0.3f;
 
     // 音频 - 每个触摸点独立
-    const float MinPlayTime = 0.05f;
+    const float MinPlayTime = 0.1f;
     const int MaxTouchSources = 10;
 
     class TouchSound
@@ -60,6 +60,18 @@ public class TapBeat : MonoBehaviour
     readonly List<RippleInfo> ripples = new List<RippleInfo>();
 
     Sprite ringSprite;
+
+    // 彩虹七色
+    static readonly Color[] RainbowColors = new Color[]
+    {
+        new Color(1f, 0f, 0f),       // 红
+        new Color(1f, 0.5f, 0f),     // 橙
+        new Color(1f, 1f, 0f),       // 黄
+        new Color(0f, 1f, 0f),       // 绿
+        new Color(0f, 1f, 1f),       // 青
+        new Color(0f, 0f, 1f),       // 蓝
+        new Color(0.5f, 0f, 1f)      // 紫
+    };
 
     void Awake()
     {
@@ -375,11 +387,12 @@ public class TapBeat : MonoBehaviour
 
     void CreateRingSprite()
     {
+        // 创建细圆环
         int size = 128;
         var tex = new Texture2D(size, size, TextureFormat.RGBA32, false);
         float center = size / 2f;
         float outerR = size / 2f - 2;
-        float innerR = outerR - 8;
+        float innerR = outerR - 3; // 很细的圆环，宽度约3像素
 
         for (int y = 0; y < size; y++)
         {
@@ -392,8 +405,9 @@ public class TapBeat : MonoBehaviour
                 float alpha = 0;
                 if (dist >= innerR && dist <= outerR)
                 {
-                    float edgeInner = Mathf.Clamp01((dist - innerR) / 1.5f);
-                    float edgeOuter = Mathf.Clamp01((outerR - dist) / 1.5f);
+                    // 边缘抗锯齿
+                    float edgeInner = Mathf.Clamp01((dist - innerR) / 1f);
+                    float edgeOuter = Mathf.Clamp01((outerR - dist) / 1f);
                     alpha = Mathf.Min(edgeInner, edgeOuter);
                 }
                 tex.SetPixel(x, y, new Color(1, 1, 1, alpha));
@@ -848,9 +862,11 @@ public class TapBeat : MonoBehaviour
         img.sprite = ringSprite;
         img.raycastTarget = false;
 
-        // 固定颜色，无透明度变化
+        // 从彩虹七色中随机选择，应用亮度
+        Color baseColor = RainbowColors[Random.Range(0, RainbowColors.Length)];
         float brightness = rippleBrightness;
-        img.color = new Color(brightness, brightness * 0.9f, brightness * 0.2f, 1f);
+        Color finalColor = new Color(baseColor.r * brightness, baseColor.g * brightness, baseColor.b * brightness, 1f);
+        img.color = finalColor;
 
         // 初始大小
         float baseSize = 100f;
@@ -867,7 +883,7 @@ public class TapBeat : MonoBehaviour
             img = img,
             birth = Time.time,
             baseSize = baseSize,
-            brightness = brightness
+            color = finalColor
         });
     }
 
@@ -875,13 +891,12 @@ public class TapBeat : MonoBehaviour
     {
         // 计算需要扩散到全屏的目标尺寸
         float screenDiagonal = Mathf.Sqrt(Screen.width * Screen.width + Screen.height * Screen.height);
-        float targetScale = screenDiagonal / 50f; // 基于基础尺寸100的缩放
 
         for (int i = ripples.Count - 1; i >= 0; i--)
         {
             var r = ripples[i];
             float age = Time.time - r.birth;
-            float duration = 0.8f; // 扩散时间
+            float duration = 2f; // 扩散时间（慢一点减少视觉暂留）
 
             if (age > duration)
             {
@@ -891,12 +906,12 @@ public class TapBeat : MonoBehaviour
             }
 
             float t = age / duration;
-            // 扩散到全屏
-            float scale = 1f + t * targetScale;
-            r.go.transform.localScale = Vector3.one * scale;
+            // 通过改变sizeDelta扩散，保持圆环粗细不变
+            float size = r.baseSize + t * screenDiagonal;
+            r.img.rectTransform.sizeDelta = new Vector2(size, size);
 
-            // 固定颜色，不改变透明度
-            r.img.color = new Color(r.brightness, r.brightness * 0.9f, r.brightness * 0.2f, 1f);
+            // 保持原色
+            r.img.color = r.color;
         }
     }
 
@@ -906,6 +921,6 @@ public class TapBeat : MonoBehaviour
         public Image img;
         public float birth;
         public float baseSize;
-        public float brightness;
+        public Color color;
     }
 }
