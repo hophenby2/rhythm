@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>Tap Beat</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{width:100%;height:100%;overflow:hidden;background:#000;
+  -webkit-user-select:none;user-select:none;touch-action:manipulation}
+#screen{width:100%;height:100%;position:relative}
+/* 点击涟漪 */
+.ripple{position:absolute;width:60px;height:60px;border-radius:50%;
+  pointer-events:none;transform:translate(-50%,-50%) scale(0);
+  animation:rippleAnim .4s ease-out forwards}
+@keyframes rippleAnim{
+  0%{transform:translate(-50%,-50%) scale(0);opacity:.6}
+  100%{transform:translate(-50%,-50%) scale(3);opacity:0}
+}
+/* BPM 显示 */
+#hud{position:fixed;top:12px;left:0;right:0;text-align:center;
+  color:rgba(255,255,255,.25);font:14px/1 monospace;pointer-events:none;
+  transition:opacity .3s}
+#hud.hide{opacity:0}
+</style>
+</head>
+<body>
+<div id="screen"></div>
+<div id="hud">轻触屏幕打节拍 | BPM: --</div>
+<script>
+// --- Web Audio 合成打击音，使用 mix 模式不打断其他音乐 ---
+const AudioCtx = window.AudioContext || window.webkitAudioContext;
+let ctx;
+
+function ensureCtx() {
+  if (!ctx) {
+    // 'playback' 类别会打断其他音乐，这里不设置或用默认
+    // Web Audio 默认不会独占音频焦点
+    ctx = new AudioCtx();
+  }
+  if (ctx.state === 'suspended') ctx.resume();
+  return ctx;
+}
+
+// 合成不同音色的打击音
+const sounds = [
+  // Hi-hat 风格
+  function(c) {
+    const t = c.currentTime;
+    const osc = c.createOscillator();
+    const g = c.createGain();
+    osc.type = 'square';
+    osc.frequency.setValueAtTime(800, t);
+    osc.frequency.exponentialRampToValueAtTime(2000, t + 0.02);
+    g.gain.setValueAtTime(0.15, t);
+    g.gain.exponentialRampToValueAtTime(0.001, t + 0.08);
+    osc.connect(g).connect(c.destination);
+    osc.start(t); osc.stop(t + 0.08);
+  },
+  // Kick 风格
+  function(c) {
+    const t = c.currentTime;
+    const osc = c.createOscillator();
+    const g = c.createGain();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(150, t);
+    osc.frequency.exponentialRampToValueAtTime(30, t + 0.15);
+    g.gain.setValueAtTime(0.3, t);
+    g.gain.exponentialRampToValueAtTime(0.001, t + 0.15);
+    osc.connect(g).connect(c.destination);
+    osc.start(t); osc.stop(t + 0.15);
+  },
+  // Snare 风格 (噪声 + 音调)
+  function(c) {
+    const t = c.currentTime;
+    // 噪声部分
+    const bufSize = c.sampleRate * 0.1;
+    const buf = c.createBuffer(1, bufSize, c.sampleRate);
+    const data = buf.getChannelData(0);
+    for (let i = 0; i < bufSize; i++) data[i] = Math.random() * 2 - 1;
+    const noise = c.createBufferSource();
+    noise.buffer = buf;
+    const ng = c.createGain();
+    ng.gain.setValueAtTime(0.15, t);
+    ng.gain.exponentialRampToValueAtTime(0.001, t + 0.1);
+    const hp = c.createBiquadFilter();
+    hp.type = 'highpass'; hp.frequency.value = 1000;
+    noise.connect(hp).connect(ng).connect(c.destination);
+    noise.start(t); noise.stop(t + 0.1);
+    // 音调部分
+    const osc = c.createOscillator();
+    const og = c.createGain();
+    osc.type = 'triangle';
+    osc.frequency.setValueAtTime(200, t);
+    osc.frequency.exponentialRampToValueAtTime(50, t + 0.08);
+    og.gain.setValueAtTime(0.2, t);
+    og.gain.exponentialRampToValueAtTime(0.001, t + 0.08);
+    osc.connect(og).connect(c.destination);
+    osc.start(t); osc.stop(t + 0.08);
+  },
+  // Rim/木鱼 风格
+  function(c) {
+    const t = c.currentTime;
+    const osc = c.createOscillator();
+    const g = c.createGain();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(520, t);
+    osc.frequency.exponentialRampToValueAtTime(400, t + 0.05);
+    g.gain.setValueAtTime(0.25, t);
+    g.gain.exponentialRampToValueAtTime(0.001, t + 0.06);
+    osc.connect(g).connect(c.destination);
+    osc.start(t); osc.stop(t + 0.06);
+  }
+];
+
+let soundIdx = 0;
+
+function playBeat(c) {
+  sounds[soundIdx](c);
+}
+
+// --- 涟漪视觉反馈 ---
+const screen = document.getElementById('screen');
+const hud = document.getElementById('hud');
+const colors = ['#ff4444','#44aaff','#44ff88','#ffaa44','#ff44ff','#ffff44'];
+let colorIdx = 0;
+
+function spawnRipple(x, y) {
+  const el = document.createElement('div');
+  el.className = 'ripple';
+  el.style.left = x + 'px';
+  el.style.top = y + 'px';
+  el.style.border = '2px solid ' + colors[colorIdx % colors.length];
+  colorIdx++;
+  screen.appendChild(el);
+  el.addEventListener('animationend', () => el.remove());
+}
+
+// --- BPM 计算 ---
+const tapTimes = [];
+let hudTimer;
+
+function calcBPM() {
+  const now = performance.now();
+  tapTimes.push(now);
+  // 只保留最近8次
+  while (tapTimes.length > 8) tapTimes.shift();
+  if (tapTimes.length < 2) { updateHUD('--'); return; }
+  let sum = 0;
+  for (let i = 1; i < tapTimes.length; i++) sum += tapTimes[i] - tapTimes[i-1];
+  const avg = sum / (tapTimes.length - 1);
+  const bpm = Math.round(60000 / avg);
+  updateHUD(bpm > 300 ? '--' : bpm);
+}
+
+function updateHUD(bpm) {
+  hud.textContent = '轻触屏幕打节拍 | BPM: ' + bpm;
+  hud.classList.remove('hide');
+  clearTimeout(hudTimer);
+  hudTimer = setTimeout(() => hud.classList.add('hide'), 3000);
+}
+
+// --- 切换音色：双指点击 ---
+let lastSwitchTime = 0;
+
+// --- 事件处理 ---
+function onTap(e) {
+  e.preventDefault();
+  const c = ensureCtx();
+
+  if (e.touches && e.touches.length >= 2) {
+    // 双指 = 切换音色
+    const now = Date.now();
+    if (now - lastSwitchTime > 400) {
+      soundIdx = (soundIdx + 1) % sounds.length;
+      lastSwitchTime = now;
+      // 播放新音色预览
+      playBeat(c);
+      hud.textContent = '音色 ' + (soundIdx + 1) + '/' + sounds.length;
+      hud.classList.remove('hide');
+      clearTimeout(hudTimer);
+      hudTimer = setTimeout(() => hud.classList.add('hide'), 1500);
+    }
+    return;
+  }
+
+  playBeat(c);
+  calcBPM();
+
+  // 涟漪位置
+  let x, y;
+  if (e.touches) { x = e.touches[0].clientX; y = e.touches[0].clientY; }
+  else { x = e.clientX; y = e.clientY; }
+  spawnRipple(x, y);
+}
+
+screen.addEventListener('touchstart', onTap, { passive: false });
+screen.addEventListener('mousedown', onTap);
+
+// 阻止长按菜单和滚动
+document.addEventListener('contextmenu', e => e.preventDefault());
+document.addEventListener('touchmove', e => e.preventDefault(), { passive: false });
+
+// 保持屏幕常亮 (Wake Lock API)
+async function keepAwake() {
+  try {
+    if ('wakeLock' in navigator) {
+      let lock = await navigator.wakeLock.request('screen');
+      document.addEventListener('visibilitychange', async () => {
+        if (document.visibilityState === 'visible') {
+          lock = await navigator.wakeLock.request('screen');
+        }
+      });
+    }
+  } catch(e) {}
+}
+keepAwake();
+</script>
+</body>
+</html>
