@@ -5,10 +5,10 @@ using System.Collections.Generic;
 
 /// <summary>
 /// 纯黑屏节拍器
-/// - 点击时立即播放可延长音效，松手时停止（最小0.1秒）
-/// - 多种预设音效可选（攻击音+循环音结构）
-/// - 涟漪为由内而外扩散的圆环
-/// - 设置界面：音效选择、偏移量、音量、涟漪亮度
+/// - 点击时立即播放可延长音效，松手时停止（最小0.05秒）
+/// - 多触摸点独立音效，正确混音
+/// - 涟漪扩散到全屏，无透明度变化
+/// - 每次启动都进入设置界面
 /// </summary>
 public class TapBeat : MonoBehaviour
 {
@@ -17,28 +17,30 @@ public class TapBeat : MonoBehaviour
     State state = State.Settings;
 
     // 设置值
-    float delayMs = 0f;        // 0 ~ 200ms 延迟
-    float volume = 0.8f;       // 0 ~ 1
-    float rippleBrightness = 0.8f; // 0 ~ 1
-    int selectedSound = 0;     // 当前选中的音效
-
-    // 按压追踪
-    Dictionary<int, float> touchStartTimes = new Dictionary<int, float>();
-    float mouseDownTime;
-    bool mouseDown;
+    float delayMs = 0f;
+    float volume = 0.8f;
+    float rippleBrightness = 0.8f;
+    int selectedSound = 0;
 
     // 双击检测
     float lastTapTime;
     const float DoubleTapThreshold = 0.3f;
 
-    // 音频
-    AudioSource attackSource;  // 播放攻击音
-    AudioSource sustainSource; // 播放循环音
-    const float MinPlayTime = 0.1f; // 最小播放时间
-    float soundStartTime;
-    bool isPlaying;
-    int activeInputCount = 0;
-    Coroutine minPlayCoroutine;
+    // 音频 - 每个触摸点独立
+    const float MinPlayTime = 0.05f;
+    const int MaxTouchSources = 10;
+
+    class TouchSound
+    {
+        public int id; // fingerId 或 -1 表示鼠标
+        public AudioSource attackSource;
+        public AudioSource sustainSource;
+        public float startTime;
+        public bool isPlaying;
+        public Coroutine stopCoroutine;
+    }
+    List<TouchSound> touchSounds = new List<TouchSound>();
+    Queue<TouchSound> soundPool = new Queue<TouchSound>();
 
     // 音效预设
     struct SoundPreset
@@ -54,11 +56,9 @@ public class TapBeat : MonoBehaviour
     GameObject settingsPanel;
     Slider offsetSlider, volumeSlider, brightnessSlider;
     Text hintText;
-    GameObject soundSelector;
     Text[] soundLabels;
     readonly List<RippleInfo> ripples = new List<RippleInfo>();
 
-    // 涟漪精灵（圆环）
     Sprite ringSprite;
 
     void Awake()
@@ -73,19 +73,28 @@ public class TapBeat : MonoBehaviour
             cam.clearFlags = CameraClearFlags.SolidColor;
         }
 
-        // 两个音频源：攻击音和循环音
-        attackSource = gameObject.AddComponent<AudioSource>();
-        attackSource.playOnAwake = false;
-        attackSource.loop = false;
-
-        sustainSource = gameObject.AddComponent<AudioSource>();
-        sustainSource.playOnAwake = false;
-        sustainSource.loop = true;
+        // 预创建音频源池
+        for (int i = 0; i < MaxTouchSources; i++)
+        {
+            var ts = new TouchSound
+            {
+                attackSource = gameObject.AddComponent<AudioSource>(),
+                sustainSource = gameObject.AddComponent<AudioSource>()
+            };
+            ts.attackSource.playOnAwake = false;
+            ts.attackSource.loop = false;
+            ts.sustainSource.playOnAwake = false;
+            ts.sustainSource.loop = true;
+            soundPool.Enqueue(ts);
+        }
 
         CreateSoundPresets();
         LoadSettings();
         CreateRingSprite();
         BuildUI();
+
+        // 每次启动都进入设置界面
+        state = State.Settings;
     }
 
     void CreateSoundPresets()
@@ -93,7 +102,6 @@ public class TapBeat : MonoBehaviour
         int sr = AudioSettings.outputSampleRate;
         presets = new SoundPreset[6];
 
-        // 1. 电子音 - 明亮的正弦波
         presets[0] = new SoundPreset
         {
             name = "电子",
@@ -101,7 +109,6 @@ public class TapBeat : MonoBehaviour
             sustainClip = CreateSustainClip(sr, 1200f, 1800f, 0.1f)
         };
 
-        // 2. 钢琴 - 泛音丰富
         presets[1] = new SoundPreset
         {
             name = "钢琴",
@@ -109,7 +116,6 @@ public class TapBeat : MonoBehaviour
             sustainClip = CreatePianoSustain(sr)
         };
 
-        // 3. 铃声 - 高频清脆
         presets[2] = new SoundPreset
         {
             name = "铃声",
@@ -117,7 +123,6 @@ public class TapBeat : MonoBehaviour
             sustainClip = CreateBellSustain(sr)
         };
 
-        // 4. 低音 - 低沉浑厚
         presets[3] = new SoundPreset
         {
             name = "低音",
@@ -125,7 +130,6 @@ public class TapBeat : MonoBehaviour
             sustainClip = CreateSustainClip(sr, 220f, 330f, 0.15f)
         };
 
-        // 5. 弦乐 - 温暖柔和
         presets[4] = new SoundPreset
         {
             name = "弦乐",
@@ -133,7 +137,6 @@ public class TapBeat : MonoBehaviour
             sustainClip = CreateStringSustain(sr)
         };
 
-        // 6. 合成 - 电子合成音
         presets[5] = new SoundPreset
         {
             name = "合成",
@@ -151,7 +154,7 @@ public class TapBeat : MonoBehaviour
         for (int i = 0; i < n; i++)
         {
             float t = (float)i / sr;
-            float env = Mathf.Pow(0.01f, t / duration); // 快速衰减
+            float env = Mathf.Pow(0.01f, t / duration);
             data[i] = (Mathf.Sin(2f * Mathf.PI * freq1 * t) * 0.4f +
                        Mathf.Sin(2f * Mathf.PI * freq2 * t) * 0.2f) * env;
         }
@@ -168,7 +171,6 @@ public class TapBeat : MonoBehaviour
         for (int i = 0; i < n; i++)
         {
             float t = (float)i / sr;
-            // 平滑的持续音，带轻微振幅调制，首尾淡入淡出确保无缝循环
             float fadeIn = Mathf.Clamp01(t / 0.01f);
             float fadeOut = Mathf.Clamp01((duration - t) / 0.01f);
             float env = (0.3f + 0.05f * Mathf.Sin(2f * Mathf.PI * 8f * t)) * fadeIn * fadeOut;
@@ -185,13 +187,12 @@ public class TapBeat : MonoBehaviour
         int n = Mathf.CeilToInt(duration * sr);
         var clip = AudioClip.Create("pianoAttack", n, 1, sr, false);
         float[] data = new float[n];
-        float baseFreq = 523.25f; // C5
+        float baseFreq = 523.25f;
 
         for (int i = 0; i < n; i++)
         {
             float t = (float)i / sr;
             float env = Mathf.Pow(0.005f, t / duration);
-            // 钢琴有丰富的泛音
             data[i] = (Mathf.Sin(2f * Mathf.PI * baseFreq * t) * 0.35f +
                        Mathf.Sin(2f * Mathf.PI * baseFreq * 2f * t) * 0.2f +
                        Mathf.Sin(2f * Mathf.PI * baseFreq * 3f * t) * 0.1f +
@@ -235,7 +236,6 @@ public class TapBeat : MonoBehaviour
         {
             float t = (float)i / sr;
             float env = Mathf.Pow(0.001f, t / duration);
-            // 铃声：高频 + 非谐波泛音
             data[i] = (Mathf.Sin(2f * Mathf.PI * baseFreq * t) * 0.3f +
                        Mathf.Sin(2f * Mathf.PI * baseFreq * 2.4f * t) * 0.2f +
                        Mathf.Sin(2f * Mathf.PI * baseFreq * 3.1f * t) * 0.1f) * env;
@@ -271,14 +271,12 @@ public class TapBeat : MonoBehaviour
         int n = Mathf.CeilToInt(duration * sr);
         var clip = AudioClip.Create("stringAttack", n, 1, sr, false);
         float[] data = new float[n];
-        float baseFreq = 440f; // A4
+        float baseFreq = 440f;
 
         for (int i = 0; i < n; i++)
         {
             float t = (float)i / sr;
-            // 弦乐：渐入然后保持
             float env = Mathf.Clamp01(t / 0.03f) * Mathf.Pow(0.1f, Mathf.Max(0, t - 0.03f) / duration);
-            // 加入轻微颤音
             float vibrato = 1f + 0.003f * Mathf.Sin(2f * Mathf.PI * 5f * t);
             data[i] = (Mathf.Sin(2f * Mathf.PI * baseFreq * vibrato * t) * 0.3f +
                        Mathf.Sin(2f * Mathf.PI * baseFreq * 2f * vibrato * t) * 0.15f +
@@ -323,7 +321,6 @@ public class TapBeat : MonoBehaviour
         {
             float t = (float)i / sr;
             float env = Mathf.Pow(0.01f, t / duration);
-            // 合成音：方波 + 锯齿波近似
             float saw = 0f;
             for (int h = 1; h <= 8; h++)
                 saw += Mathf.Sin(2f * Mathf.PI * baseFreq * h * t) / h * 0.15f;
@@ -347,7 +344,6 @@ public class TapBeat : MonoBehaviour
             float fadeIn = Mathf.Clamp01(t / 0.008f);
             float fadeOut = Mathf.Clamp01((duration - t) / 0.008f);
             float env = 0.25f * fadeIn * fadeOut;
-            // 带滤波效果的持续音
             float lfo = 0.5f + 0.5f * Mathf.Sin(2f * Mathf.PI * 4f * t);
             float saw = 0f;
             for (int h = 1; h <= 6; h++)
@@ -424,7 +420,6 @@ public class TapBeat : MonoBehaviour
         scaler.referenceResolution = new Vector2(1080, 1920);
         canvasGo.AddComponent<GraphicRaycaster>();
 
-        // 设置面板（居中显示，增大高度以容纳音效选择）
         settingsPanel = new GameObject("Settings");
         settingsPanel.transform.SetParent(canvas.transform, false);
         var panelRt = settingsPanel.AddComponent<RectTransform>();
@@ -435,10 +430,8 @@ public class TapBeat : MonoBehaviour
         var panelImg = settingsPanel.AddComponent<Image>();
         panelImg.color = new Color(0.1f, 0.1f, 0.1f, 0.9f);
 
-        // 音效选择器（顶部）
         CreateSoundSelector(settingsPanel, 0.85f);
 
-        // 滑动条
         offsetSlider = CreateSlider(settingsPanel, "延迟", 0.62f, 0f, 200f, delayMs, v =>
         {
             delayMs = v;
@@ -457,10 +450,9 @@ public class TapBeat : MonoBehaviour
         {
             rippleBrightness = v;
             SaveSettings();
-            SpawnRipple(new Vector2(Screen.width / 2f, Screen.height / 2f), 0.15f);
+            SpawnRipple(new Vector2(Screen.width / 2f, Screen.height / 2f));
         });
 
-        // 提示文字
         var hintGo = new GameObject("Hint");
         hintGo.transform.SetParent(canvas.transform, false);
         hintText = hintGo.AddComponent<Text>();
@@ -478,16 +470,15 @@ public class TapBeat : MonoBehaviour
 
     void CreateSoundSelector(GameObject parent, float yAnchor)
     {
-        soundSelector = new GameObject("SoundSelector");
-        soundSelector.transform.SetParent(parent.transform, false);
-        var rt = soundSelector.AddComponent<RectTransform>();
+        var selector = new GameObject("SoundSelector");
+        selector.transform.SetParent(parent.transform, false);
+        var rt = selector.AddComponent<RectTransform>();
         rt.anchorMin = new Vector2(0.05f, yAnchor - 0.12f);
         rt.anchorMax = new Vector2(0.95f, yAnchor + 0.05f);
         rt.offsetMin = rt.offsetMax = Vector2.zero;
 
-        // 标签
         var labelGo = new GameObject("Label");
-        labelGo.transform.SetParent(soundSelector.transform, false);
+        labelGo.transform.SetParent(selector.transform, false);
         var labelText = labelGo.AddComponent<Text>();
         labelText.font = Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf");
         if (labelText.font == null) labelText.font = Resources.GetBuiltinResource<Font>("Arial.ttf");
@@ -500,14 +491,13 @@ public class TapBeat : MonoBehaviour
         labelRt.anchorMax = new Vector2(0.15f, 1f);
         labelRt.offsetMin = labelRt.offsetMax = Vector2.zero;
 
-        // 音效按钮
         soundLabels = new Text[presets.Length];
         float btnWidth = 0.8f / presets.Length;
         for (int i = 0; i < presets.Length; i++)
         {
             int idx = i;
             var btnGo = new GameObject(presets[i].name);
-            btnGo.transform.SetParent(soundSelector.transform, false);
+            btnGo.transform.SetParent(selector.transform, false);
 
             var btnImg = btnGo.AddComponent<Image>();
             btnImg.color = (i == selectedSound) ? new Color(1f, 0.9f, 0.2f, 1f) : new Color(0.3f, 0.3f, 0.3f, 1f);
@@ -544,7 +534,6 @@ public class TapBeat : MonoBehaviour
         selectedSound = index;
         SaveSettings();
 
-        // 更新按钮颜色
         for (int i = 0; i < presets.Length; i++)
         {
             var btnImg = soundLabels[i].transform.parent.GetComponent<Image>();
@@ -652,25 +641,18 @@ public class TapBeat : MonoBehaviour
             {
                 if (!IsTouchOnSettings(touch.position))
                 {
-                    touchStartTimes[touch.fingerId] = Time.time;
-
                     if (Time.time - lastTapTime < DoubleTapThreshold)
                     {
                         StartGame();
                         return;
                     }
                     lastTapTime = Time.time;
-                    OnTapPress(touch.position);
+                    OnTapPress(touch.fingerId, touch.position);
                 }
             }
             else if (touch.phase == TouchPhase.Ended || touch.phase == TouchPhase.Canceled)
             {
-                if (touchStartTimes.ContainsKey(touch.fingerId))
-                {
-                    float holdTime = Time.time - touchStartTimes[touch.fingerId];
-                    OnTapRelease(touch.position, holdTime);
-                    touchStartTimes.Remove(touch.fingerId);
-                }
+                OnTapRelease(touch.fingerId);
             }
         }
 
@@ -678,23 +660,18 @@ public class TapBeat : MonoBehaviour
         {
             if (!IsTouchOnSettings(Input.mousePosition))
             {
-                mouseDown = true;
-                mouseDownTime = Time.time;
-
                 if (Time.time - lastTapTime < DoubleTapThreshold)
                 {
                     StartGame();
                     return;
                 }
                 lastTapTime = Time.time;
-                OnTapPress(Input.mousePosition);
+                OnTapPress(-1, Input.mousePosition);
             }
         }
-        if (Input.GetMouseButtonUp(0) && mouseDown)
+        if (Input.GetMouseButtonUp(0))
         {
-            mouseDown = false;
-            float holdTime = Time.time - mouseDownTime;
-            OnTapRelease(Input.mousePosition, holdTime);
+            OnTapRelease(-1);
         }
     }
 
@@ -706,31 +683,21 @@ public class TapBeat : MonoBehaviour
 
             if (touch.phase == TouchPhase.Began)
             {
-                touchStartTimes[touch.fingerId] = Time.time;
-                OnTapPress(touch.position);
+                OnTapPress(touch.fingerId, touch.position);
             }
             else if (touch.phase == TouchPhase.Ended || touch.phase == TouchPhase.Canceled)
             {
-                if (touchStartTimes.ContainsKey(touch.fingerId))
-                {
-                    float holdTime = Time.time - touchStartTimes[touch.fingerId];
-                    OnTapRelease(touch.position, holdTime);
-                    touchStartTimes.Remove(touch.fingerId);
-                }
+                OnTapRelease(touch.fingerId);
             }
         }
 
         if (Input.GetMouseButtonDown(0))
         {
-            mouseDown = true;
-            mouseDownTime = Time.time;
-            OnTapPress(Input.mousePosition);
+            OnTapPress(-1, Input.mousePosition);
         }
-        if (Input.GetMouseButtonUp(0) && mouseDown)
+        if (Input.GetMouseButtonUp(0))
         {
-            mouseDown = false;
-            float holdTime = Time.time - mouseDownTime;
-            OnTapRelease(Input.mousePosition, holdTime);
+            OnTapRelease(-1);
         }
     }
 
@@ -758,117 +725,122 @@ public class TapBeat : MonoBehaviour
         state = State.Playing;
         settingsPanel.SetActive(false);
         hintText.gameObject.SetActive(false);
-        touchStartTimes.Clear();
-        mouseDown = false;
-        activeInputCount = 0;
-        StopTapSound();
+        StopAllTouchSounds();
     }
 
-    void OnTapPress(Vector2 pos)
+    void OnTapPress(int id, Vector2 pos)
     {
-        SpawnRipple(pos, 0.15f);
+        SpawnRipple(pos);
 
-        activeInputCount++;
-        if (activeInputCount == 1)
+        // 获取或创建独立的音效实例
+        if (soundPool.Count > 0)
         {
+            var ts = soundPool.Dequeue();
+            ts.id = id;
+            ts.startTime = Time.time;
+            ts.isPlaying = true;
+
             if (delayMs <= 0)
             {
-                StartTapSound();
+                StartSound(ts);
             }
             else
             {
-                StartCoroutine(DelayedStartSound(delayMs / 1000f));
+                StartCoroutine(DelayedStartSound(ts, delayMs / 1000f));
             }
+
+            touchSounds.Add(ts);
         }
     }
 
-    void OnTapRelease(Vector2 pos, float holdTime)
+    void OnTapRelease(int id)
     {
-        activeInputCount = Mathf.Max(0, activeInputCount - 1);
-        if (activeInputCount == 0)
+        var ts = touchSounds.Find(t => t.id == id);
+        if (ts != null)
         {
-            // 确保最小播放时间
-            if (isPlaying)
+            float elapsed = Time.time - ts.startTime;
+            if (elapsed < MinPlayTime)
             {
-                float elapsed = Time.time - soundStartTime;
-                if (elapsed < MinPlayTime)
-                {
-                    // 延迟停止
-                    if (minPlayCoroutine != null)
-                        StopCoroutine(minPlayCoroutine);
-                    minPlayCoroutine = StartCoroutine(DelayedStopSound(MinPlayTime - elapsed));
-                }
-                else
-                {
-                    StopTapSound();
-                }
+                if (ts.stopCoroutine != null)
+                    StopCoroutine(ts.stopCoroutine);
+                ts.stopCoroutine = StartCoroutine(DelayedStopSound(ts, MinPlayTime - elapsed));
+            }
+            else
+            {
+                StopSound(ts);
             }
         }
     }
 
-    System.Collections.IEnumerator DelayedStartSound(float delaySec)
+    System.Collections.IEnumerator DelayedStartSound(TouchSound ts, float delaySec)
     {
         yield return new WaitForSeconds(delaySec);
-        if (activeInputCount > 0)
+        if (ts.isPlaying)
         {
-            StartTapSound();
+            StartSound(ts);
         }
     }
 
-    System.Collections.IEnumerator DelayedStopSound(float delaySec)
+    System.Collections.IEnumerator DelayedStopSound(TouchSound ts, float delaySec)
     {
         yield return new WaitForSeconds(delaySec);
-        if (activeInputCount == 0)
-        {
-            StopTapSound();
-        }
+        StopSound(ts);
     }
 
-    void StartTapSound()
+    void StartSound(TouchSound ts)
     {
-        if (isPlaying) return;
-        isPlaying = true;
-        soundStartTime = Time.time;
-
         var preset = presets[selectedSound];
-
-        // 播放攻击音
-        attackSource.volume = volume;
-        attackSource.PlayOneShot(preset.attackClip);
-
-        // 设置并播放循环音（攻击音结束后会平滑过渡）
-        sustainSource.clip = preset.sustainClip;
-        sustainSource.volume = volume;
-        sustainSource.Play();
+        ts.attackSource.volume = volume;
+        ts.attackSource.PlayOneShot(preset.attackClip);
+        ts.sustainSource.clip = preset.sustainClip;
+        ts.sustainSource.volume = volume;
+        ts.sustainSource.Play();
     }
 
-    void StopTapSound()
+    void StopSound(TouchSound ts)
     {
-        isPlaying = false;
-        attackSource.Stop();
-        sustainSource.Stop();
+        ts.isPlaying = false;
+        ts.attackSource.Stop();
+        ts.sustainSource.Stop();
+        touchSounds.Remove(ts);
+        soundPool.Enqueue(ts);
+    }
+
+    void StopAllTouchSounds()
+    {
+        foreach (var ts in touchSounds)
+        {
+            ts.isPlaying = false;
+            ts.attackSource.Stop();
+            ts.sustainSource.Stop();
+            soundPool.Enqueue(ts);
+        }
+        touchSounds.Clear();
     }
 
     void PlayPreviewSound()
     {
-        // 预览音效：播放攻击音 + 短暂循环音
-        var preset = presets[selectedSound];
-        attackSource.volume = volume;
-        attackSource.PlayOneShot(preset.attackClip);
-
-        sustainSource.clip = preset.sustainClip;
-        sustainSource.volume = volume;
-        sustainSource.Play();
-        StartCoroutine(StopPreviewAfter(0.2f));
+        if (soundPool.Count > 0)
+        {
+            var ts = soundPool.Dequeue();
+            var preset = presets[selectedSound];
+            ts.attackSource.volume = volume;
+            ts.attackSource.PlayOneShot(preset.attackClip);
+            ts.sustainSource.clip = preset.sustainClip;
+            ts.sustainSource.volume = volume;
+            ts.sustainSource.Play();
+            StartCoroutine(StopPreviewAfter(ts, 0.2f));
+        }
     }
 
-    System.Collections.IEnumerator StopPreviewAfter(float sec)
+    System.Collections.IEnumerator StopPreviewAfter(TouchSound ts, float sec)
     {
         yield return new WaitForSeconds(sec);
-        sustainSource.Stop();
+        ts.sustainSource.Stop();
+        soundPool.Enqueue(ts);
     }
 
-    void SpawnRipple(Vector2 screenPos, float holdTime)
+    void SpawnRipple(Vector2 screenPos)
     {
         var go = new GameObject("Ripple");
         go.transform.SetParent(canvas.transform, false);
@@ -876,10 +848,12 @@ public class TapBeat : MonoBehaviour
         img.sprite = ringSprite;
         img.raycastTarget = false;
 
+        // 固定颜色，无透明度变化
         float brightness = rippleBrightness;
-        img.color = new Color(brightness, brightness * 0.9f, brightness * 0.2f, brightness * 0.8f);
+        img.color = new Color(brightness, brightness * 0.9f, brightness * 0.2f, 1f);
 
-        float baseSize = Mathf.Lerp(80, 200, Mathf.Clamp01(holdTime / 0.5f));
+        // 初始大小
+        float baseSize = 100f;
         img.rectTransform.sizeDelta = new Vector2(baseSize, baseSize);
 
         Vector2 localPoint;
@@ -899,11 +873,15 @@ public class TapBeat : MonoBehaviour
 
     void UpdateRipples()
     {
+        // 计算需要扩散到全屏的目标尺寸
+        float screenDiagonal = Mathf.Sqrt(Screen.width * Screen.width + Screen.height * Screen.height);
+        float targetScale = screenDiagonal / 50f; // 基于基础尺寸100的缩放
+
         for (int i = ripples.Count - 1; i >= 0; i--)
         {
             var r = ripples[i];
             float age = Time.time - r.birth;
-            float duration = 0.5f;
+            float duration = 0.8f; // 扩散时间
 
             if (age > duration)
             {
@@ -913,11 +891,12 @@ public class TapBeat : MonoBehaviour
             }
 
             float t = age / duration;
-            float scale = 1f + t * 2.5f;
+            // 扩散到全屏
+            float scale = 1f + t * targetScale;
             r.go.transform.localScale = Vector3.one * scale;
 
-            float alpha = r.brightness * 0.8f * (1f - t);
-            r.img.color = new Color(r.brightness, r.brightness * 0.9f, r.brightness * 0.2f, alpha);
+            // 固定颜色，不改变透明度
+            r.img.color = new Color(r.brightness, r.brightness * 0.9f, r.brightness * 0.2f, 1f);
         }
     }
 
