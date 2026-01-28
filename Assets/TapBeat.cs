@@ -798,6 +798,24 @@ public class TapBeat : MonoBehaviour
         touchSounds.Clear();
     }
 
+    // 处理应用暂停（锁屏、切后台、来电等）
+    void OnApplicationPause(bool pauseStatus)
+    {
+        if (pauseStatus)
+        {
+            StopAllTouchSounds();
+        }
+    }
+
+    // 处理应用失去焦点（弹窗、通知等）
+    void OnApplicationFocus(bool hasFocus)
+    {
+        if (!hasFocus)
+        {
+            StopAllTouchSounds();
+        }
+    }
+
     void PlayPreviewSound()
     {
         if (soundPool.Count > 0)
@@ -885,7 +903,7 @@ public class TapBeat : MonoBehaviour
         {
             var r = ripples[i];
             float age = Time.time - r.birth;
-            float duration = 1.5f; // 扩散时间
+            float duration = 2.5f; // 扩散时间
 
             if (age > duration)
             {
