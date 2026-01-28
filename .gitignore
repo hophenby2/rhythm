@@ -48,3 +48,9 @@ crashlytics-build.properties
 
 # Packaging
 *.unitypackage
+
+# Burst debug info
+*_BurstDebugInformation_DoNotShip/
+
+# Misc
+nul

@@ -24,7 +24,7 @@ public class SetupScene
             cam.clearFlags = CameraClearFlags.SolidColor;
         }
 
-        // 创建 TapBeat 对象（会自动添加 MicOnsetDetector 和 AndroidAudioCaptureProxy）
+        // 创建 TapBeat 对象
         var tapBeat = new GameObject("TapBeat");
         tapBeat.AddComponent<TapBeat>();
 
@@ -32,24 +32,25 @@ public class SetupScene
         EditorSceneManager.MarkSceneDirty(scene);
 
         Debug.Log("TapBeat scene setup complete.\n" +
-            "- Layer 1: Tap-tempo BPM lock (always active)\n" +
-            "- Layer 2: Microphone onset detection (fallback)\n" +
-            "- Layer 3: Android system audio capture (Android 10+ only)\n" +
+            "两种模式:\n" +
+            "1. 导入音频 - 预分析鼓点，播放时判定\n" +
+            "2. 自由模式 - 纯点击，只有反馈音效\n\n" +
             "Press Play to test.");
     }
 
-    [MenuItem("TapBeat/Build Settings Info")]
-    public static void ShowBuildInfo()
+    [MenuItem("TapBeat/Create StreamingAssets Folder")]
+    public static void CreateStreamingAssets()
     {
-        EditorUtility.DisplayDialog("TapBeat Build Settings",
-            "Android 构建注意事项:\n\n" +
-            "1. Minimum API Level: 21 (Android 5.0)\n" +
-            "2. Target API Level: 29+ (系统音频捕获需要 Android 10)\n" +
-            "3. 确保 AndroidManifest.xml 中包含 RECORD_AUDIO 权限\n" +
-            "4. 确保 AndroidManifest.xml 中 audio-focus 设为 false\n\n" +
-            "iOS 构建注意事项:\n" +
-            "1. 在 Player Settings 添加 Microphone Usage Description\n" +
-            "2. iOS 无法捕获系统音频，仅支持麦克风模式",
+        string path = Application.streamingAssetsPath;
+        if (!System.IO.Directory.Exists(path))
+        {
+            System.IO.Directory.CreateDirectory(path);
+            AssetDatabase.Refresh();
+        }
+        EditorUtility.DisplayDialog("StreamingAssets",
+            "已创建 StreamingAssets 文件夹。\n\n" +
+            "将音频文件（mp3/wav/ogg）放入此文件夹，\n" +
+            "命名为 music.mp3 即可在移动端自动加载。",
             "OK");
     }
 }
