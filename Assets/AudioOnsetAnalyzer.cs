@@ -2,17 +2,16 @@ using UnityEngine;
 using System.Collections.Generic;
 
 /// <summary>
-/// 离线音频 onset 分析器
-/// 对导入的音频文件进行预分析，提取所有鼓点/节拍时间点
-/// 使用 Spectral Flux + Peak Picking 算法
+/// 高效的离线音频 onset 分析器
+/// 使用多频带能量差分检测鼓点/节拍
 /// </summary>
 public static class AudioOnsetAnalyzer
 {
     // 分析参数
-    const int FFTSize = 1024;
-    const int HopSize = 512;
-    const float OnsetThresholdMultiplier = 1.4f;  // onset 阈值倍数
-    const float MinOnsetInterval = 0.06f;          // 最小 onset 间隔（秒）
+    const int FrameSize = 1024;          // 每帧样本数
+    const int HopSize = 512;             // 帧移
+    const int NumBands = 8;              // 频带数（少量频带，快速计算）
+    const float MinOnsetInterval = 0.05f; // 最小 onset 间隔
 
     /// <summary>
     /// 分析音频并返回所有 onset 时间点（秒）
@@ -25,30 +24,32 @@ public static class AudioOnsetAnalyzer
         int channels = clip.channels;
         int totalSamples = clip.samples;
 
-        // 获取所有样本（转为单声道）
+        // 获取样本并转单声道
         float[] samples = new float[totalSamples * channels];
         clip.GetData(samples, 0);
+        float[] mono = ToMono(samples, channels, totalSamples);
 
-        float[] mono = ToMono(samples, channels);
+        // 降采样以加速分析（目标 ~11kHz，足够检测 onset）
+        int downsampleFactor = Mathf.Max(1, sampleRate / 11025);
+        float[] downsampled = Downsample(mono, downsampleFactor);
+        int effectiveRate = sampleRate / downsampleFactor;
 
-        // 计算 spectral flux
-        List<float> fluxValues = ComputeSpectralFlux(mono, sampleRate);
+        // 计算每帧的多频带能量
+        List<float[]> bandEnergies = ComputeBandEnergies(downsampled, effectiveRate);
 
-        // Peak picking 找 onset
-        List<float> onsets = PickOnsets(fluxValues, sampleRate);
+        // 检测 onset（能量突增）
+        List<float> onsets = DetectOnsets(bandEnergies, effectiveRate);
 
-        Debug.Log($"[AudioOnsetAnalyzer] Found {onsets.Count} onsets in {clip.length:F1}s audio");
+        Debug.Log($"[AudioOnsetAnalyzer] {clip.length:F1}s audio, {onsets.Count} onsets detected");
 
         return onsets;
     }
 
-    static float[] ToMono(float[] samples, int channels)
+    static float[] ToMono(float[] samples, int channels, int monoLength)
     {
         if (channels == 1) return samples;
 
-        int monoLength = samples.Length / channels;
         float[] mono = new float[monoLength];
-
         for (int i = 0; i < monoLength; i++)
         {
             float sum = 0;
@@ -59,185 +60,163 @@ public static class AudioOnsetAnalyzer
         return mono;
     }
 
-    static List<float> ComputeSpectralFlux(float[] samples, int sampleRate)
+    static float[] Downsample(float[] samples, int factor)
     {
-        List<float> flux = new List<float>();
-        int numFrames = (samples.Length - FFTSize) / HopSize + 1;
+        if (factor <= 1) return samples;
 
-        float[] prevSpectrum = new float[FFTSize / 2];
-        float[] currentSpectrum = new float[FFTSize / 2];
-        float[] window = MakeHannWindow(FFTSize);
-        float[] frame = new float[FFTSize];
+        int newLen = samples.Length / factor;
+        float[] result = new float[newLen];
+        for (int i = 0; i < newLen; i++)
+            result[i] = samples[i * factor];
+        return result;
+    }
+
+    static List<float[]> ComputeBandEnergies(float[] samples, int sampleRate)
+    {
+        List<float[]> energies = new List<float[]>();
+        int numFrames = (samples.Length - FrameSize) / HopSize + 1;
+
+        // 预计算每个频带的频率范围（对数分布）
+        // 频带 0: 低频 (bass), 频带 7: 高频 (hi-hat)
+        float[] bandLimits = new float[NumBands + 1];
+        float minFreq = 60f;
+        float maxFreq = sampleRate / 2f * 0.8f;
+        for (int b = 0; b <= NumBands; b++)
+        {
+            float t = (float)b / NumBands;
+            bandLimits[b] = minFreq * Mathf.Pow(maxFreq / minFreq, t);
+        }
 
         for (int f = 0; f < numFrames; f++)
         {
             int offset = f * HopSize;
+            float[] bandEnergy = new float[NumBands];
 
-            // 应用窗函数
-            for (int i = 0; i < FFTSize; i++)
+            // 简单的频带能量计算：用差分近似高频
+            // 低频用原始信号能量，高频用差分信号能量
+            float lowEnergy = 0, midEnergy = 0, highEnergy = 0;
+
+            for (int i = 0; i < FrameSize && offset + i < samples.Length; i++)
             {
-                if (offset + i < samples.Length)
-                    frame[i] = samples[offset + i] * window[i];
-                else
-                    frame[i] = 0;
+                float s = samples[offset + i];
+                lowEnergy += s * s;
+
+                // 一阶差分（近似高频）
+                if (i > 0)
+                {
+                    float diff = samples[offset + i] - samples[offset + i - 1];
+                    midEnergy += diff * diff;
+                }
+
+                // 二阶差分（更高频）
+                if (i > 1)
+                {
+                    float diff2 = samples[offset + i] - 2 * samples[offset + i - 1] + samples[offset + i - 2];
+                    highEnergy += diff2 * diff2;
+                }
             }
 
-            // 计算频谱幅度（简化 DFT，按频带分组）
-            ComputeMagnitudeSpectrum(frame, currentSpectrum, sampleRate);
+            // 简化为 3 个主要频带，复制到 8 个用于平滑
+            lowEnergy = Mathf.Sqrt(lowEnergy / FrameSize);
+            midEnergy = Mathf.Sqrt(midEnergy / FrameSize) * 2f;  // 放大中频
+            highEnergy = Mathf.Sqrt(highEnergy / FrameSize) * 4f; // 放大高频
 
-            // 计算 spectral flux（只计算正向差分）
+            // 分配到各频带
+            bandEnergy[0] = lowEnergy;
+            bandEnergy[1] = lowEnergy * 0.7f + midEnergy * 0.3f;
+            bandEnergy[2] = lowEnergy * 0.3f + midEnergy * 0.7f;
+            bandEnergy[3] = midEnergy;
+            bandEnergy[4] = midEnergy * 0.7f + highEnergy * 0.3f;
+            bandEnergy[5] = midEnergy * 0.3f + highEnergy * 0.7f;
+            bandEnergy[6] = highEnergy;
+            bandEnergy[7] = highEnergy;
+
+            energies.Add(bandEnergy);
+        }
+
+        return energies;
+    }
+
+    static List<float> DetectOnsets(List<float[]> bandEnergies, int sampleRate)
+    {
+        List<float> onsets = new List<float>();
+        if (bandEnergies.Count < 3) return onsets;
+
+        int windowSize = Mathf.Max(5, sampleRate / HopSize / 8); // ~125ms 窗口
+        float[] flux = new float[bandEnergies.Count];
+
+        // 计算 spectral flux（各频带能量增加的加权和）
+        for (int f = 1; f < bandEnergies.Count; f++)
+        {
             float frameFlux = 0;
-            for (int i = 0; i < currentSpectrum.Length; i++)
+            for (int b = 0; b < NumBands; b++)
             {
-                float diff = currentSpectrum[i] - prevSpectrum[i];
+                float diff = bandEnergies[f][b] - bandEnergies[f - 1][b];
                 if (diff > 0)
                 {
-                    // 高频加权（鼓点通常有更多高频成分）
-                    float weight = 1f + (float)i / currentSpectrum.Length;
+                    // 高频带权重更大（鼓点特征）
+                    float weight = 1f + (float)b / NumBands;
                     frameFlux += diff * weight;
                 }
             }
-            flux.Add(frameFlux);
-
-            // 保存当前频谱
-            System.Array.Copy(currentSpectrum, prevSpectrum, currentSpectrum.Length);
+            flux[f] = frameFlux;
         }
 
-        return flux;
-    }
-
-    static void ComputeMagnitudeSpectrum(float[] frame, float[] spectrum, int sampleRate)
-    {
-        // 简化版频谱计算：分成多个频带，计算每个频带的能量
-        int bands = spectrum.Length;
-        int samplesPerBand = FFTSize / bands;
-
-        for (int b = 0; b < bands; b++)
-        {
-            float energy = 0;
-            int start = b * samplesPerBand;
-            int end = Mathf.Min(start + samplesPerBand, FFTSize);
-
-            // 使用 Goertzel 算法的简化版本计算该频带能量
-            float freq = (float)(b + 1) * sampleRate / FFTSize;
-            float w = 2f * Mathf.PI * freq / sampleRate;
-            float coeff = 2f * Mathf.Cos(w);
-            float s0 = 0, s1 = 0, s2 = 0;
-
-            for (int i = 0; i < FFTSize; i++)
-            {
-                s0 = frame[i] + coeff * s1 - s2;
-                s2 = s1;
-                s1 = s0;
-            }
-
-            energy = Mathf.Sqrt(s1 * s1 + s2 * s2 - coeff * s1 * s2);
-            spectrum[b] = energy;
-        }
-    }
-
-    static List<float> PickOnsets(List<float> flux, int sampleRate)
-    {
-        List<float> onsets = new List<float>();
-        if (flux.Count == 0) return onsets;
-
-        // 计算自适应阈值（滑动窗口平均 + 标准差）
-        int windowSize = Mathf.Max(10, sampleRate / HopSize / 4); // ~250ms 窗口
-        float[] threshold = new float[flux.Count];
-
-        for (int i = 0; i < flux.Count; i++)
-        {
-            int start = Mathf.Max(0, i - windowSize / 2);
-            int end = Mathf.Min(flux.Count, i + windowSize / 2);
-
-            float mean = 0, variance = 0;
-            int count = end - start;
-
-            for (int j = start; j < end; j++)
-                mean += flux[j];
-            mean /= count;
-
-            for (int j = start; j < end; j++)
-            {
-                float d = flux[j] - mean;
-                variance += d * d;
-            }
-            float stddev = Mathf.Sqrt(variance / count);
-
-            threshold[i] = mean + OnsetThresholdMultiplier * Mathf.Max(stddev, 0.001f);
-        }
-
-        // Peak picking
+        // 自适应阈值 + 峰值检测
         float minIntervalFrames = MinOnsetInterval * sampleRate / HopSize;
         float lastOnsetFrame = -minIntervalFrames;
 
-        for (int i = 1; i < flux.Count - 1; i++)
+        for (int f = 1; f < flux.Length - 1; f++)
         {
-            // 检查是否是局部峰值且超过阈值
-            if (flux[i] > threshold[i] &&
-                flux[i] > flux[i - 1] &&
-                flux[i] >= flux[i + 1] &&
-                (i - lastOnsetFrame) >= minIntervalFrames)
+            // 计算局部统计
+            int start = Mathf.Max(0, f - windowSize);
+            int end = Mathf.Min(flux.Length, f + windowSize);
+
+            float mean = 0, max = 0;
+            for (int i = start; i < end; i++)
             {
-                float timeSeconds = (float)i * HopSize / sampleRate;
+                mean += flux[i];
+                if (flux[i] > max) max = flux[i];
+            }
+            mean /= (end - start);
+
+            // 自适应阈值
+            float threshold = mean * 1.5f + max * 0.1f;
+
+            // 峰值检测
+            if (flux[f] > threshold &&
+                flux[f] > flux[f - 1] &&
+                flux[f] >= flux[f + 1] &&
+                (f - lastOnsetFrame) >= minIntervalFrames)
+            {
+                float timeSeconds = (float)f * HopSize / sampleRate;
                 onsets.Add(timeSeconds);
-                lastOnsetFrame = i;
+                lastOnsetFrame = f;
             }
         }
-
-        // 后处理：合并太近的 onset
-        onsets = MergeCloseOnsets(onsets, MinOnsetInterval);
 
         return onsets;
     }
 
-    static List<float> MergeCloseOnsets(List<float> onsets, float minInterval)
-    {
-        if (onsets.Count <= 1) return onsets;
-
-        List<float> merged = new List<float>();
-        merged.Add(onsets[0]);
-
-        for (int i = 1; i < onsets.Count; i++)
-        {
-            if (onsets[i] - merged[merged.Count - 1] >= minInterval)
-                merged.Add(onsets[i]);
-        }
-
-        return merged;
-    }
-
-    static float[] MakeHannWindow(int size)
-    {
-        float[] window = new float[size];
-        for (int i = 0; i < size; i++)
-            window[i] = 0.5f * (1f - Mathf.Cos(2f * Mathf.PI * i / (size - 1)));
-        return window;
-    }
-
     /// <summary>
-    /// 分析结果的简单统计
+    /// 估算 BPM
     /// </summary>
     public static float EstimateBPM(List<float> onsets)
     {
         if (onsets.Count < 4) return 0;
 
-        // 计算间隔
         List<float> intervals = new List<float>();
         for (int i = 1; i < onsets.Count; i++)
         {
             float interval = onsets[i] - onsets[i - 1];
-            if (interval > 0.2f && interval < 2f) // 30-300 BPM 范围
+            if (interval > 0.2f && interval < 2f)
                 intervals.Add(interval);
         }
 
         if (intervals.Count == 0) return 0;
 
-        // 聚类找最常见的间隔
         intervals.Sort();
-        int mid = intervals.Count / 2;
-        float medianInterval = intervals[mid];
-
-        return 60f / medianInterval;
+        float median = intervals[intervals.Count / 2];
+        return 60f / median;
     }
 }
