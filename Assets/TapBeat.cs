@@ -29,7 +29,6 @@ public class TapBeat : MonoBehaviour
     // 音频 - 每个触摸点独立
     const float MinPlayTime = 0.1f;
     const int MaxTouchSources = 10;
-    const float RingThickness = 4f; // 圆环粗细（像素）
 
     class TouchSound
     {
@@ -59,8 +58,6 @@ public class TapBeat : MonoBehaviour
     Text hintText;
     Text[] soundLabels;
     readonly List<RippleInfo> ripples = new List<RippleInfo>();
-
-    Sprite circleSprite;
 
     // 彩虹七色
     static readonly Color[] RainbowColors = new Color[]
@@ -103,7 +100,6 @@ public class TapBeat : MonoBehaviour
 
         CreateSoundPresets();
         LoadSettings();
-        CreateCircleSprite();
         BuildUI();
 
         // 每次启动都进入设置界面
@@ -386,30 +382,6 @@ public class TapBeat : MonoBehaviour
         PlayerPrefs.Save();
     }
 
-    void CreateCircleSprite()
-    {
-        // 创建实心圆
-        int size = 128;
-        var tex = new Texture2D(size, size, TextureFormat.RGBA32, false);
-        float center = size / 2f;
-        float radius = size / 2f - 2;
-
-        for (int y = 0; y < size; y++)
-        {
-            for (int x = 0; x < size; x++)
-            {
-                float dx = x - center;
-                float dy = y - center;
-                float dist = Mathf.Sqrt(dx * dx + dy * dy);
-
-                // 边缘抗锯齿
-                float alpha = Mathf.Clamp01((radius - dist) / 1f);
-                tex.SetPixel(x, y, new Color(1, 1, 1, alpha));
-            }
-        }
-        tex.Apply();
-        circleSprite = Sprite.Create(tex, new Rect(0, 0, size, size), new Vector2(0.5f, 0.5f), size);
-    }
 
     void BuildUI()
     {
@@ -851,63 +823,63 @@ public class TapBeat : MonoBehaviour
     void SpawnRipple(Vector2 screenPos)
     {
         var go = new GameObject("Ripple");
-        go.transform.SetParent(canvas.transform, false);
-        var rt = go.AddComponent<RectTransform>();
 
-        Vector2 localPoint;
-        RectTransformUtility.ScreenPointToLocalPointInRectangle(
-            canvas.transform as RectTransform, screenPos, null, out localPoint);
-        rt.anchoredPosition = localPoint;
+        // 将屏幕坐标转换为世界坐标（z=10，在相机前面）
+        Vector3 worldPos = Camera.main.ScreenToWorldPoint(new Vector3(screenPos.x, screenPos.y, 10f));
+        go.transform.position = worldPos;
 
-        // 外圈（彩色）
-        var outerGo = new GameObject("Outer");
-        outerGo.transform.SetParent(go.transform, false);
-        var outerImg = outerGo.AddComponent<Image>();
-        outerImg.sprite = circleSprite;
-        outerImg.raycastTarget = false;
-        var outerRt = outerImg.rectTransform;
-        outerRt.anchorMin = new Vector2(0.5f, 0.5f);
-        outerRt.anchorMax = new Vector2(0.5f, 0.5f);
-        outerRt.anchoredPosition = Vector2.zero;
-
-        // 内圈（黑色，遮挡形成环）
-        var innerGo = new GameObject("Inner");
-        innerGo.transform.SetParent(go.transform, false);
-        var innerImg = innerGo.AddComponent<Image>();
-        innerImg.sprite = circleSprite;
-        innerImg.raycastTarget = false;
-        innerImg.color = Color.black;
-        var innerRt = innerImg.rectTransform;
-        innerRt.anchorMin = new Vector2(0.5f, 0.5f);
-        innerRt.anchorMax = new Vector2(0.5f, 0.5f);
-        innerRt.anchoredPosition = Vector2.zero;
+        var lr = go.AddComponent<LineRenderer>();
+        lr.useWorldSpace = false;
+        lr.loop = true;
+        lr.sortingOrder = 100; // 确保在最前面
 
         // 从彩虹七色中随机选择，应用亮度
         Color baseColor = RainbowColors[Random.Range(0, RainbowColors.Length)];
         float brightness = rippleBrightness;
         Color finalColor = new Color(baseColor.r * brightness, baseColor.g * brightness, baseColor.b * brightness, 1f);
-        outerImg.color = finalColor;
 
-        // 初始大小
-        float baseSize = 100f;
-        outerRt.sizeDelta = new Vector2(baseSize, baseSize);
-        innerRt.sizeDelta = new Vector2(baseSize - RingThickness * 2, baseSize - RingThickness * 2);
+        // 设置材质和颜色
+        lr.material = new Material(Shader.Find("Sprites/Default"));
+        lr.startColor = finalColor;
+        lr.endColor = finalColor;
+
+        // 固定线宽（世界单位）
+        float lineWidth = 0.05f;
+        lr.startWidth = lineWidth;
+        lr.endWidth = lineWidth;
+
+        // 初始半径
+        float baseRadius = 0.5f;
+        SetCirclePositions(lr, baseRadius, 64);
 
         ripples.Add(new RippleInfo
         {
             go = go,
-            outerImg = outerImg,
-            innerImg = innerImg,
+            lr = lr,
             birth = Time.time,
-            baseSize = baseSize,
-            color = finalColor
+            baseRadius = baseRadius
         });
+    }
+
+    void SetCirclePositions(LineRenderer lr, float radius, int segments)
+    {
+        lr.positionCount = segments;
+        float angleStep = 360f / segments;
+        for (int i = 0; i < segments; i++)
+        {
+            float angle = Mathf.Deg2Rad * (i * angleStep);
+            float x = Mathf.Cos(angle) * radius;
+            float y = Mathf.Sin(angle) * radius;
+            lr.SetPosition(i, new Vector3(x, y, 0));
+        }
     }
 
     void UpdateRipples()
     {
-        // 计算需要扩散到全屏的目标尺寸
-        float screenDiagonal = Mathf.Sqrt(Screen.width * Screen.width + Screen.height * Screen.height);
+        // 计算需要扩散到全屏的目标半径（世界单位）
+        // 相机在z=0，涟漪在z=10，计算该距离下可见的最大半径
+        float distance = 10f;
+        float maxRadius = distance * Mathf.Tan(Camera.main.fieldOfView * 0.5f * Mathf.Deg2Rad) * 1.5f;
 
         for (int i = ripples.Count - 1; i >= 0; i--)
         {
@@ -923,21 +895,17 @@ public class TapBeat : MonoBehaviour
             }
 
             float t = age / duration;
-            // 外圈和内圈同时扩散，保持圆环粗细不变
-            float size = r.baseSize + t * screenDiagonal;
-            float innerSize = size - RingThickness * 2;
-            r.outerImg.rectTransform.sizeDelta = new Vector2(size, size);
-            r.innerImg.rectTransform.sizeDelta = new Vector2(innerSize, innerSize);
+            // 更新半径，圆环粗细保持不变
+            float newRadius = r.baseRadius + t * maxRadius;
+            SetCirclePositions(r.lr, newRadius, 64);
         }
     }
 
     struct RippleInfo
     {
         public GameObject go;
-        public Image outerImg;
-        public Image innerImg;
+        public LineRenderer lr;
         public float birth;
-        public float baseSize;
-        public Color color;
+        public float baseRadius;
     }
 }
